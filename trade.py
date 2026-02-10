@@ -8,7 +8,7 @@ import pandas as pd
 from pykalshi import Action, OrderType, Side
 
 from main import get_client, fetch_nba_player_props
-from underdog import fetch_underdog_data, parse_nba_props
+from draftkings import fetch_subcategory, parse_props, SUBCATEGORY_MAP, KALSHI_STATS
 
 # Map Kalshi series tickers to Underdog stat names
 SERIES_TO_STAT = {
@@ -86,13 +86,13 @@ def parse_kalshi_title(title):
     return match.group(1).strip(), int(match.group(2))
 
 
-def find_edges(kalshi_csv, underdog_csv, min_edge):
-    """Find edges between Kalshi and Underdog markets.
+def find_edges(kalshi_csv, draftkings_csv, min_edge):
+    """Find edges between Kalshi and DraftKings markets.
 
     Returns a DataFrame of opportunities where the edge exceeds min_edge (in cents).
     """
     kalshi_df = pd.read_csv(kalshi_csv)
-    underdog_df = pd.read_csv(underdog_csv)
+    dk_df = pd.read_csv(draftkings_csv)
 
     edges = []
 
@@ -115,25 +115,25 @@ def find_edges(kalshi_csv, underdog_csv, min_edge):
         if pd.isna(yes_ask) or pd.isna(no_ask) or yes_ask == 0 or no_ask == 0:
             continue
 
-        # Kalshi "N+" means >= N, equivalent to Underdog "over N-0.5"
-        underdog_threshold = threshold - 0.5
+        # Kalshi "N+" means >= N, equivalent to DraftKings "over N-0.5"
+        dk_threshold = threshold - 0.5
 
-        # Find matching Underdog lines
-        matches = underdog_df[
-            (underdog_df["full_name"].str.lower() == player_name.lower())
-            & (underdog_df["stat_name"].str.lower() == stat_name.lower())
-            & (underdog_df["stat_value"] == underdog_threshold)
+        # Find matching DraftKings lines
+        matches = dk_df[
+            (dk_df["full_name"].str.lower() == player_name.lower())
+            & (dk_df["stat_name"].str.lower() == stat_name.lower())
+            & (dk_df["stat_value"] == dk_threshold)
         ]
 
-        for _, ud_row in matches.iterrows():
-            payout = ud_row["payout_multiplier"]
-            if pd.isna(payout) or payout <= 0:
+        for _, dk_row in matches.iterrows():
+            odds_decimal = dk_row["odds_decimal"]
+            if pd.isna(odds_decimal) or odds_decimal <= 0:
                 continue
 
-            # Implied probability from Underdog: bet $1, profit = payout_multiplier
-            ud_implied_prob = 1.0 / (1.0 + payout) * 100  # in cents scale
+            # Implied probability from decimal odds: 1 / odds_decimal
+            dk_implied_prob = (1.0 / odds_decimal) * 100  # in cents scale
 
-            choice = ud_row["choice"]
+            choice = dk_row["choice"]
             base = {
                 "ticker": row["ticker"],
                 "player": player_name,
@@ -141,14 +141,15 @@ def find_edges(kalshi_csv, underdog_csv, min_edge):
                 "threshold": threshold,
                 "kalshi_yes_ask": yes_ask,
                 "kalshi_no_ask": no_ask,
-                "underdog_choice": choice,
-                "underdog_payout_multiplier": payout,
-                "underdog_implied": round(ud_implied_prob, 1),
+                "dk_choice": choice,
+                "dk_odds_decimal": odds_decimal,
+                "dk_odds_american": dk_row.get("odds_american", ""),
+                "dk_implied": round(dk_implied_prob, 1),
             }
 
             if choice == "over":
-                # Underdog says "over" is worth ud_implied_prob, Kalshi yes_ask is the cost
-                edge = ud_implied_prob - yes_ask
+                # DraftKings says "over" is worth dk_implied_prob, Kalshi yes_ask is the cost
+                edge = dk_implied_prob - yes_ask
                 if edge >= min_edge:
                     edges.append({
                         **base,
@@ -157,8 +158,8 @@ def find_edges(kalshi_csv, underdog_csv, min_edge):
                         "edge": round(edge, 1),
                     })
             elif choice == "under":
-                # Underdog says "under" is worth ud_implied_prob, Kalshi no_ask is the cost
-                edge = ud_implied_prob - no_ask
+                # DraftKings says "under" is worth dk_implied_prob, Kalshi no_ask is the cost
+                edge = dk_implied_prob - no_ask
                 if edge >= min_edge:
                     edges.append({
                         **base,
@@ -245,7 +246,7 @@ def cmd_manual(args):
 
 
 def refresh_data():
-    """Re-fetch Kalshi and Underdog data, overwriting the CSVs."""
+    """Re-fetch Kalshi and DraftKings data, overwriting the CSVs."""
     client = get_client()
 
     print("Refreshing Kalshi markets...")
@@ -253,11 +254,20 @@ def refresh_data():
     kalshi_df.to_csv("nba_player_props.csv", index=False)
     print(f"  {len(kalshi_df)} markets saved to nba_player_props.csv")
 
-    print("Refreshing Underdog lines...")
-    ud_data = fetch_underdog_data()
-    ud_df = parse_nba_props(ud_data)
-    ud_df.to_csv("underdog_nba_props.csv", index=False)
-    print(f"  {len(ud_df)} lines saved to underdog_nba_props.csv")
+    print("Refreshing DraftKings lines...")
+    all_rows = []
+    for subcategory_id, stat_name in SUBCATEGORY_MAP.items():
+        if stat_name not in KALSHI_STATS:
+            continue
+        try:
+            data = fetch_subcategory(subcategory_id)
+            all_rows.extend(parse_props(data, stat_name))
+        except Exception as e:
+            print(f"  {stat_name} (subcategory {subcategory_id}): error — {e}")
+    dk_df = pd.DataFrame(all_rows)
+    if len(dk_df) > 0:
+        dk_df.to_csv("draftkings_nba_props.csv", index=False)
+    print(f"  {len(dk_df)} lines saved to draftkings_nba_props.csv")
 
 
 def cmd_auto(args):
@@ -269,7 +279,7 @@ def cmd_auto(args):
         print()
 
     print("Scanning for edges...")
-    edges_df = find_edges("nba_player_props.csv", "underdog_nba_props.csv", args.min_edge)
+    edges_df = find_edges("nba_player_props.csv", "draftkings_nba_props.csv", args.min_edge)
 
     if edges_df.empty:
         print("No edges found.")
@@ -305,8 +315,8 @@ def main():
     manual_parser.add_argument("--type", default="limit", choices=["limit", "market"], help="Order type (default: limit)")
 
     # Auto edge detection
-    auto_parser = subparsers.add_parser("auto", help="Find and trade edges vs Underdog")
-    auto_parser.add_argument("--refresh", action="store_true", help="Re-fetch Kalshi and Underdog data before scanning")
+    auto_parser = subparsers.add_parser("auto", help="Find and trade edges vs DraftKings")
+    auto_parser.add_argument("--refresh", action="store_true", help="Re-fetch Kalshi and DraftKings data before scanning")
     auto_parser.add_argument("--min-edge", type=int, default=5, help="Minimum edge in cents (default: 5)")
     auto_parser.add_argument("--count", type=int, default=5, help="Contracts per trade (default: 5)")
     auto_parser.add_argument("--type", default="limit", choices=["limit", "market"], help="Order type (default: limit)")
