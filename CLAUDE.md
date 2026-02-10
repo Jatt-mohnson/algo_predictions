@@ -6,7 +6,8 @@ NBA player prop trading system that pulls markets from Kalshi and Underdog Fanta
 
 - `main.py` — Fetches open NBA player prop markets from the Kalshi API via `pykalshi` and saves to `nba_player_props.csv`
 - `underdog.py` — Fetches NBA player prop lines from the Underdog Fantasy public API and saves to `underdog_nba_props.csv`
-- `trade.py` — Trading script with manual order placement and automated edge detection between Kalshi and Underdog
+- `draftkings.py` — Fetches NBA player prop over/under odds from DraftKings Sportsbook and saves to `draftkings_nba_props.csv`
+- `trade.py` — Trading script with manual order placement and automated edge detection between Kalshi and DraftKings
 
 ## Setup
 
@@ -30,6 +31,9 @@ uv run python main.py
 
 # Pull current Underdog Fantasy NBA player prop lines
 uv run python underdog.py
+
+# Pull current DraftKings NBA player prop over/under odds
+uv run python draftkings.py
 ```
 
 Both scripts write CSV files that `trade.py` reads from. Run these first to get fresh data, or use `--refresh` on the auto subcommand to fetch inline.
@@ -78,18 +82,18 @@ Global flags (before the subcommand):
 - `--max-spend N` — max total spend in cents across all orders in a run (default: 5000 = $50)
 
 Auto-specific flags:
-- `--refresh` — re-fetch Kalshi and Underdog data before scanning for edges
+- `--refresh` — re-fetch Kalshi and DraftKings data before scanning for edges
 
 ### Generated files
 
-- `edges.csv` — Raw data for every detected edge (written on each auto run). Includes Kalshi bid/ask, Underdog payout multiplier, implied probability, and computed edge for manual verification.
+- `edges.csv` — Raw data for every detected edge (written on each auto run). Includes Kalshi bid/ask, DraftKings decimal odds, implied probability, and computed edge for manual verification.
 - `trades_log.csv` — Append-only log of every real order placed. Used to deduplicate: subsequent auto runs skip any `(ticker, side)` already in the log. Delete a row (or the whole file) to allow re-trading.
 
 ## Key Concepts
 
 - **Prices are in cents (1-99)** matching Kalshi's binary contract model. A yes_ask of 45 means 45 cents, implying ~45% probability.
-- **Edge detection** compares Kalshi ask prices against Underdog implied probabilities. Underdog `payout_multiplier` converts to implied probability as `1 / (1 + payout_multiplier)`.
-- **Threshold matching** between platforms: Kalshi "N+" (>= N) maps to Underdog "over N-0.5".
+- **Edge detection** compares Kalshi ask prices against DraftKings implied probabilities. DraftKings `odds_decimal` converts to implied probability as `1 / odds_decimal`.
+- **Threshold matching** between platforms: Kalshi "N+" (>= N) maps to DraftKings "over N-0.5".
 - **Series tickers** identify stat types: KXNBAPTS=Points, KXNBAREB=Rebounds, KXNBAAST=Assists, KXNBA3PT=3-Pointers Made, KXNBASTL=Steals, KXNBABLK=Blocks.
 - **Trade deduplication** — Real (non-dry-run) orders are logged to `trades_log.csv`. On subsequent runs, edges matching an already-traded `(ticker, side)` are skipped automatically.
 
