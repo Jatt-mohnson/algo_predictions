@@ -125,13 +125,26 @@ def find_edges(kalshi_csv, draftkings_csv, min_edge):
             & (dk_df["stat_value"] == dk_threshold)
         ]
 
+        # Compute vig-free implied probabilities by normalizing over+under
+        over_row = matches[matches["choice"] == "over"]
+        under_row = matches[matches["choice"] == "under"]
+        if over_row.empty or under_row.empty:
+            continue
+        over_odds = over_row.iloc[0]["odds_decimal"]
+        under_odds = under_row.iloc[0]["odds_decimal"]
+        if pd.isna(over_odds) or pd.isna(under_odds) or over_odds <= 0 or under_odds <= 0:
+            continue
+        raw_over = 1.0 / over_odds
+        raw_under = 1.0 / under_odds
+        overround = raw_over + raw_under
+
         for _, dk_row in matches.iterrows():
             odds_decimal = dk_row["odds_decimal"]
             if pd.isna(odds_decimal) or odds_decimal <= 0:
                 continue
 
-            # Implied probability from decimal odds: 1 / odds_decimal
-            dk_implied_prob = (1.0 / odds_decimal) * 100  # in cents scale
+            # Vig-free implied probability: normalize raw probability by overround
+            dk_implied_prob = (1.0 / odds_decimal / overround) * 100  # in cents scale
 
             choice = dk_row["choice"]
             base = {
