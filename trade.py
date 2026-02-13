@@ -9,6 +9,14 @@ from pykalshi import Action, OrderType, Side
 
 from main import get_client, fetch_nba_player_props
 from draftkings import fetch_subcategory, parse_props, SUBCATEGORY_MAP, KALSHI_STATS
+from pinnacle import (
+    fetch_matchups as pinn_fetch_matchups,
+    parse_props as pinn_parse_props,
+    fetch_all_prices as pinn_fetch_prices,
+    american_to_decimal as pinn_american_to_decimal,
+    CATEGORY_MAP as PINN_CATEGORY_MAP,
+    KALSHI_STATS as PINN_KALSHI_STATS,
+)
 
 # Map Kalshi series tickers to Underdog stat names
 SERIES_TO_STAT = {
@@ -86,13 +94,50 @@ def parse_kalshi_title(title):
     return match.group(1).strip(), int(match.group(2))
 
 
-def find_edges(kalshi_csv, draftkings_csv, min_edge):
-    """Find edges between Kalshi and DraftKings markets.
+def _compute_vig_free_implied(matches):
+    """Compute vig-free implied probabilities for over/under rows.
 
+    Returns a dict mapping choice -> vig-free implied probability (in cents scale),
+    or None if we can't compute (missing over or under).
+    """
+    over_row = matches[matches["choice"] == "over"]
+    under_row = matches[matches["choice"] == "under"]
+    if over_row.empty or under_row.empty:
+        return None
+    over_odds = over_row.iloc[0]["odds_decimal"]
+    under_odds = under_row.iloc[0]["odds_decimal"]
+    if pd.isna(over_odds) or pd.isna(under_odds) or over_odds <= 0 or under_odds <= 0:
+        return None
+    raw_over = 1.0 / over_odds
+    raw_under = 1.0 / under_odds
+    overround = raw_over + raw_under
+    result = {}
+    for _, r in matches.iterrows():
+        odds = r["odds_decimal"]
+        if pd.isna(odds) or odds <= 0:
+            continue
+        result[r["choice"]] = (1.0 / odds / overround) * 100
+    return result
+
+
+def _load_book_df(source):
+    """Load sportsbook CSV(s) based on source. Returns list of (label, DataFrame) pairs."""
+    dfs = []
+    if source in ("draftkings", "both"):
+        dfs.append(("dk", pd.read_csv("draftkings_nba_props.csv")))
+    if source in ("pinnacle", "both"):
+        dfs.append(("pinn", pd.read_csv("pinnacle_nba_props.csv")))
+    return dfs
+
+
+def find_edges(kalshi_csv, min_edge, source="both"):
+    """Find edges between Kalshi and sportsbook markets.
+
+    source: "draftkings", "pinnacle", or "both" (averages implied probabilities).
     Returns a DataFrame of opportunities where the edge exceeds min_edge (in cents).
     """
     kalshi_df = pd.read_csv(kalshi_csv)
-    dk_df = pd.read_csv(draftkings_csv)
+    book_dfs = _load_book_df(source)
 
     edges = []
 
@@ -101,10 +146,8 @@ def find_edges(kalshi_csv, draftkings_csv, min_edge):
         if player_name is None:
             continue
 
-        # series_ticker may be empty; extract from ticker prefix instead
         series = row.get("series_ticker", "")
         if not series or (isinstance(series, float) and pd.isna(series)):
-            # Ticker format: KXNBAPTS-26FEB10SASLAL-...
             series = row["ticker"].split("-")[0]
         stat_name = SERIES_TO_STAT.get(series)
         if not stat_name:
@@ -115,38 +158,42 @@ def find_edges(kalshi_csv, draftkings_csv, min_edge):
         if pd.isna(yes_ask) or pd.isna(no_ask) or yes_ask == 0 or no_ask == 0:
             continue
 
-        # Kalshi "N+" means >= N, equivalent to DraftKings "over N-0.5"
-        dk_threshold = threshold - 0.5
+        book_threshold = threshold - 0.5
 
-        # Find matching DraftKings lines
-        matches = dk_df[
-            (dk_df["full_name"].str.lower() == player_name.lower())
-            & (dk_df["stat_name"].str.lower() == stat_name.lower())
-            & (dk_df["stat_value"] == dk_threshold)
-        ]
+        # Collect vig-free implied probabilities from each book
+        book_implied = {}  # label -> {choice -> implied_prob}
+        for label, df in book_dfs:
+            matches = df[
+                (df["full_name"].str.lower() == player_name.lower())
+                & (df["stat_name"].str.lower() == stat_name.lower())
+                & (df["stat_value"] == book_threshold)
+            ]
+            implied = _compute_vig_free_implied(matches)
+            if implied:
+                book_implied[label] = implied
 
-        # Compute vig-free implied probabilities by normalizing over+under
-        over_row = matches[matches["choice"] == "over"]
-        under_row = matches[matches["choice"] == "under"]
-        if over_row.empty or under_row.empty:
+        if not book_implied:
             continue
-        over_odds = over_row.iloc[0]["odds_decimal"]
-        under_odds = under_row.iloc[0]["odds_decimal"]
-        if pd.isna(over_odds) or pd.isna(under_odds) or over_odds <= 0 or under_odds <= 0:
-            continue
-        raw_over = 1.0 / over_odds
-        raw_under = 1.0 / under_odds
-        overround = raw_over + raw_under
 
-        for _, dk_row in matches.iterrows():
-            odds_decimal = dk_row["odds_decimal"]
-            if pd.isna(odds_decimal) or odds_decimal <= 0:
+        for choice in ("over", "under"):
+            # Gather implied values from each book for this choice
+            implieds = {}
+            for label, imp in book_implied.items():
+                if choice in imp:
+                    implieds[label] = imp[choice]
+
+            if not implieds:
                 continue
 
-            # Vig-free implied probability: normalize raw probability by overround
-            dk_implied_prob = (1.0 / odds_decimal / overround) * 100  # in cents scale
+            avg_implied = sum(implieds.values()) / len(implieds)
 
-            choice = dk_row["choice"]
+            kalshi_price = yes_ask if choice == "over" else no_ask
+            side = "yes" if choice == "over" else "no"
+            edge_val = avg_implied - kalshi_price
+
+            if edge_val < min_edge:
+                continue
+
             base = {
                 "ticker": row["ticker"],
                 "player": player_name,
@@ -154,32 +201,25 @@ def find_edges(kalshi_csv, draftkings_csv, min_edge):
                 "threshold": threshold,
                 "kalshi_yes_ask": yes_ask,
                 "kalshi_no_ask": no_ask,
-                "dk_choice": choice,
-                "dk_odds_decimal": odds_decimal,
-                "dk_odds_american": dk_row.get("odds_american", ""),
-                "dk_implied": round(dk_implied_prob, 1),
+                "choice": choice,
             }
 
-            if choice == "over":
-                # DraftKings says "over" is worth dk_implied_prob, Kalshi yes_ask is the cost
-                edge = dk_implied_prob - yes_ask
-                if edge >= min_edge:
-                    edges.append({
-                        **base,
-                        "side": "yes",
-                        "kalshi_price": yes_ask,
-                        "edge": round(edge, 1),
-                    })
-            elif choice == "under":
-                # DraftKings says "under" is worth dk_implied_prob, Kalshi no_ask is the cost
-                edge = dk_implied_prob - no_ask
-                if edge >= min_edge:
-                    edges.append({
-                        **base,
-                        "side": "no",
-                        "kalshi_price": no_ask,
-                        "edge": round(edge, 1),
-                    })
+            # Add per-book implied columns
+            if source == "both":
+                base["dk_implied"] = round(implieds["dk"], 1) if "dk" in implieds else ""
+                base["pinn_implied"] = round(implieds["pinn"], 1) if "pinn" in implieds else ""
+                base["avg_implied"] = round(avg_implied, 1)
+            elif source == "draftkings":
+                base["dk_implied"] = round(avg_implied, 1)
+            elif source == "pinnacle":
+                base["pinn_implied"] = round(avg_implied, 1)
+
+            edges.append({
+                **base,
+                "side": side,
+                "kalshi_price": kalshi_price,
+                "edge": round(edge_val, 1),
+            })
 
     edges_df = pd.DataFrame(edges)
     if not edges_df.empty:
@@ -258,29 +298,55 @@ def cmd_manual(args):
     place_trade(client, args.ticker, action, side, args.count, order_type, args.price, args.dry_run)
 
 
-def refresh_data():
-    """Re-fetch Kalshi and DraftKings data, overwriting the CSVs."""
+def refresh_data(source="both"):
+    """Re-fetch Kalshi and sportsbook data, overwriting the CSVs."""
     client = get_client()
 
     print("Refreshing Kalshi markets...")
     kalshi_df = fetch_nba_player_props(client)
     kalshi_df.to_csv("nba_player_props.csv", index=False)
     print(f"  {len(kalshi_df)} markets saved to nba_player_props.csv")
+    
+    if source in ("pinnacle", "both"):
+        print("Refreshing Pinnacle lines...")
+        matchups = pinn_fetch_matchups()
+        props = pinn_parse_props(matchups)
+        if props.empty:
+            print("  No Pinnacle props found.")
+        else:
+            props["stat_name"] = props["category"].map(PINN_CATEGORY_MAP)
+            props = props.dropna(subset=["stat_name"])
+            props = props[props["stat_name"].isin(PINN_KALSHI_STATS)]
+            if props.empty:
+                print("  No Kalshi-supported Pinnacle props found.")
+            else:
+                matchup_ids = props["matchup_id"].unique().tolist()
+                prices = pinn_fetch_prices(matchup_ids)
+                if prices.empty:
+                    print("  No Pinnacle prices found.")
+                else:
+                    merged = props.merge(prices, on="participant_id", how="inner")
+                    merged["odds_decimal"] = merged["odds_american"].apply(pinn_american_to_decimal)
+                    result = merged[["player", "stat_name", "stat_value", "choice", "odds_decimal", "odds_american"]].copy()
+                    result = result.rename(columns={"player": "full_name"})
+                    result.to_csv("pinnacle_nba_props.csv", index=False)
+                    print(f"  {len(result)} lines saved to pinnacle_nba_props.csv")
 
-    print("Refreshing DraftKings lines...")
-    all_rows = []
-    for subcategory_id, stat_name in SUBCATEGORY_MAP.items():
-        if stat_name not in KALSHI_STATS:
-            continue
-        try:
-            data = fetch_subcategory(subcategory_id)
-            all_rows.extend(parse_props(data, stat_name))
-        except Exception as e:
-            print(f"  {stat_name} (subcategory {subcategory_id}): error — {e}")
-    dk_df = pd.DataFrame(all_rows)
-    if len(dk_df) > 0:
-        dk_df.to_csv("draftkings_nba_props.csv", index=False)
-    print(f"  {len(dk_df)} lines saved to draftkings_nba_props.csv")
+    if source in ("draftkings", "both"):
+        print("Refreshing DraftKings lines...")
+        all_rows = []
+        for subcategory_id, stat_name in SUBCATEGORY_MAP.items():
+            if stat_name not in KALSHI_STATS:
+                continue
+            try:
+                data = fetch_subcategory(subcategory_id)
+                all_rows.extend(parse_props(data, stat_name))
+            except Exception as e:
+                print(f"  {stat_name} (subcategory {subcategory_id}): error — {e}")
+        dk_df = pd.DataFrame(all_rows)
+        if len(dk_df) > 0:
+            dk_df.to_csv("draftkings_nba_props.csv", index=False)
+        print(f"  {len(dk_df)} lines saved to draftkings_nba_props.csv")
 
 
 def cmd_auto(args):
@@ -288,11 +354,11 @@ def cmd_auto(args):
     order_type = OrderType(args.type)
 
     if args.refresh:
-        refresh_data()
+        refresh_data(source=args.source)
         print()
 
-    print("Scanning for edges...")
-    edges_df = find_edges("nba_player_props.csv", "draftkings_nba_props.csv", args.min_edge)
+    print(f"Scanning for edges (source: {args.source})...")
+    edges_df = find_edges("nba_player_props.csv", args.min_edge, source=args.source)
 
     if edges_df.empty:
         print("No edges found.")
@@ -328,8 +394,10 @@ def main():
     manual_parser.add_argument("--type", default="limit", choices=["limit", "market"], help="Order type (default: limit)")
 
     # Auto edge detection
-    auto_parser = subparsers.add_parser("auto", help="Find and trade edges vs DraftKings")
-    auto_parser.add_argument("--refresh", action="store_true", help="Re-fetch Kalshi and DraftKings data before scanning")
+    auto_parser = subparsers.add_parser("auto", help="Find and trade edges vs sportsbooks")
+    auto_parser.add_argument("--source", default="both", choices=["draftkings", "pinnacle", "both"],
+                             help="Odds source for edge detection (default: both)")
+    auto_parser.add_argument("--refresh", action="store_true", help="Re-fetch Kalshi and sportsbook data before scanning")
     auto_parser.add_argument("--min-edge", type=int, default=5, help="Minimum edge in cents (default: 5)")
     auto_parser.add_argument("--count", type=int, default=5, help="Contracts per trade (default: 5)")
     auto_parser.add_argument("--type", default="limit", choices=["limit", "market"], help="Order type (default: limit)")
