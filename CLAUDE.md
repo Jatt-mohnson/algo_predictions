@@ -7,7 +7,8 @@ NBA player prop trading system that pulls markets from Kalshi and Underdog Fanta
 - `main.py` — Fetches open NBA player prop markets from the Kalshi API via `pykalshi` and saves to `nba_player_props.csv`
 - `underdog.py` — Fetches NBA player prop lines from the Underdog Fantasy public API and saves to `underdog_nba_props.csv`
 - `draftkings.py` — Fetches NBA player prop over/under odds from DraftKings Sportsbook and saves to `draftkings_nba_props.csv`
-- `trade.py` — Trading script with manual order placement and automated edge detection between Kalshi and DraftKings
+- `pinnacle.py` — Fetches NBA player prop over/under odds from Pinnacle Sportsbook (guest API) and saves to `pinnacle_nba_props.csv`
+- `trade.py` — Trading script with manual order placement and automated edge detection between Kalshi and sportsbooks (DraftKings, Pinnacle, or both)
 
 ## Setup
 
@@ -34,6 +35,9 @@ uv run python underdog.py
 
 # Pull current DraftKings NBA player prop over/under odds
 uv run python draftkings.py
+
+# Pull current Pinnacle NBA player prop over/under odds
+uv run python pinnacle.py
 ```
 
 Both scripts write CSV files that `trade.py` reads from. Run these first to get fresh data, or use `--refresh` on the auto subcommand to fetch inline.
@@ -63,6 +67,10 @@ uv run python trade.py --yes manual \
 # Scan for edges (dry run) — finds mispriced markets without trading
 uv run python trade.py --dry-run auto --min-edge 10
 
+# Use a specific odds source (draftkings, pinnacle, or both)
+uv run python trade.py --dry-run auto --source draftkings --min-edge 10
+uv run python trade.py --dry-run auto --source pinnacle --min-edge 10
+
 # Refresh data from both sources before scanning
 uv run python trade.py --dry-run auto --refresh --min-edge 10
 
@@ -82,7 +90,8 @@ Global flags (before the subcommand):
 - `--max-spend N` — max total spend in cents across all orders in a run (default: 5000 = $50)
 
 Auto-specific flags:
-- `--refresh` — re-fetch Kalshi and DraftKings data before scanning for edges
+- `--source {draftkings,pinnacle,both}` — odds source for edge detection (default: both). When `both`, averages implied probabilities from both books.
+- `--refresh` — re-fetch Kalshi and sportsbook data before scanning for edges
 
 ### Generated files
 
@@ -92,7 +101,7 @@ Auto-specific flags:
 ## Key Concepts
 
 - **Prices are in cents (1-99)** matching Kalshi's binary contract model. A yes_ask of 45 means 45 cents, implying ~45% probability.
-- **Edge detection** compares Kalshi ask prices against DraftKings implied probabilities. DraftKings `odds_decimal` converts to implied probability as `1 / odds_decimal`.
+- **Edge detection** compares Kalshi ask prices against sportsbook implied probabilities (DraftKings, Pinnacle, or both averaged). `odds_decimal` converts to implied probability as `1 / odds_decimal`, then vig is removed by normalizing over+under.
 - **Threshold matching** between platforms: Kalshi "N+" (>= N) maps to DraftKings "over N-0.5".
 - **Series tickers** identify stat types: KXNBAPTS=Points, KXNBAREB=Rebounds, KXNBAAST=Assists, KXNBA3PT=3-Pointers Made, KXNBASTL=Steals, KXNBABLK=Blocks.
 - **Trade deduplication** — Real (non-dry-run) orders are logged to `trades_log.csv`. On subsequent runs, edges matching an already-traded `(ticker, side)` are skipped automatically.
