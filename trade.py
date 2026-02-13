@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import re
 import sys
@@ -30,6 +31,19 @@ SERIES_TO_STAT = {
 
 TRADES_LOG = "trades_log.csv"
 
+# Kalshi fee coefficients (per their fee schedule)
+TAKER_FEE_COEFF = 0.07
+MAKER_FEE_COEFF = 0.0175
+
+
+def estimate_fee(price_cents, count, coeff=TAKER_FEE_COEFF):
+    """Estimate Kalshi fee in cents.
+
+    Formula: ceil(coeff × count × P × (1-P)) where P = price_cents / 100.
+    """
+    p = price_cents / 100.0
+    return math.ceil(coeff * count * p * (1 - p))
+
 
 def load_traded_keys():
     """Load the set of (ticker, side) pairs already traded."""
@@ -59,6 +73,7 @@ def place_trade(client, ticker, action, side, count, order_type, price, dry_run=
     price_kwargs = {"yes_price": price} if side == Side.YES else {"no_price": price}
 
     cost = price * count if action == Action.BUY else (100 - price) * count
+    fee = estimate_fee(price, count)
     print(f"  Ticker:  {ticker}")
     print(f"  Action:  {action.value}")
     print(f"  Side:    {side.value}")
@@ -66,6 +81,8 @@ def place_trade(client, ticker, action, side, count, order_type, price, dry_run=
     print(f"  Type:    {order_type.value}")
     print(f"  Price:   {price}¢")
     print(f"  Est cost: {cost}¢ (${cost / 100:.2f})")
+    fee_pct = (fee / cost * 100) if cost > 0 else 0
+    print(f"  Est fee:  {fee}¢ (${fee / 100:.2f}) [{fee_pct:.1f}% of cost, taker]")
 
     if dry_run:
         print("  [DRY RUN] Order not placed.")
@@ -231,6 +248,7 @@ def execute_edge_trades(client, edges_df, count, order_type, max_contracts, max_
     """Place trades for each detected edge, respecting guardrails."""
     traded_keys = load_traded_keys()
     total_spend = 0
+    total_fees = 0
     skipped = 0
 
     for _, edge in edges_df.iterrows():
@@ -262,6 +280,7 @@ def execute_edge_trades(client, edges_df, count, order_type, max_contracts, max_
 
         order = place_trade(client, edge["ticker"], Action.BUY, side, order_count, order_type, price, dry_run)
         total_spend += price * order_count
+        total_fees += estimate_fee(price, order_count)
 
         if order is not None:
             log_trade(edge["ticker"], Action.BUY, side, order_count, order_type, price)
@@ -270,6 +289,8 @@ def execute_edge_trades(client, edges_df, count, order_type, max_contracts, max_
     if skipped:
         print(f"\nSkipped {skipped} edge(s) already traded (see {TRADES_LOG})")
     print(f"Total spend this run: {total_spend}¢ (${total_spend / 100:.2f})")
+    fees_pct = (total_fees / total_spend * 100) if total_spend > 0 else 0
+    print(f"Total est fees:       {total_fees}¢ (${total_fees / 100:.2f}) [{fees_pct:.1f}% of spend, taker]")
 
 
 def cmd_manual(args):
