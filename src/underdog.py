@@ -1,6 +1,8 @@
 import requests
 import pandas as pd
 
+from src.common import UNDERDOG_CSV
+
 API_URL = "https://api.underdogfantasy.com/beta/v6/over_under_lines"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -78,9 +80,9 @@ def main():
     print("Fetching Underdog Fantasy NBA player props...")
     data = fetch_underdog_data()
     df = parse_nba_props(data)
-    df.to_csv("underdog_nba_props.csv", index=False)
+    df.to_csv(UNDERDOG_CSV, index=False)
     print(f"Found {len(df)} NBA player prop lines")
-    print(f"Saved to underdog_nba_props.csv")
+    print(f"Saved to {UNDERDOG_CSV}")
 
 
 if __name__ == "__main__":

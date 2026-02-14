@@ -4,11 +4,17 @@ NBA player prop trading system that pulls markets from Kalshi and Underdog Fanta
 
 ## Project Structure
 
-- `main.py` — Fetches open NBA player prop markets from the Kalshi API via `pykalshi` and saves to `nba_player_props.csv`
-- `underdog.py` — Fetches NBA player prop lines from the Underdog Fantasy public API and saves to `underdog_nba_props.csv`
-- `draftkings.py` — Fetches NBA player prop over/under odds from DraftKings Sportsbook and saves to `draftkings_nba_props.csv`
-- `pinnacle.py` — Fetches NBA player prop over/under odds from Pinnacle Sportsbook (guest API) and saves to `pinnacle_nba_props.csv`
-- `trade.py` — Trading script with manual order placement and automated edge detection between Kalshi and sportsbooks (DraftKings, Pinnacle, or both)
+```
+src/
+  common.py     — Shared constants (stat mappings, CSV paths) and utilities
+  main.py       — Fetches open NBA player prop markets from the Kalshi API
+  underdog.py   — Fetches NBA player prop lines from the Underdog Fantasy public API
+  draftkings.py — Fetches NBA player prop over/under odds from DraftKings Sportsbook
+  pinnacle.py   — Fetches NBA player prop over/under odds from Pinnacle Sportsbook (guest API)
+  compare.py    — Joins all data sources into a unified comparison view
+  trade.py      — Trading script with manual order placement and automated edge detection
+data/           — Generated CSV files (gitignored)
+```
 
 ## Setup
 
@@ -28,35 +34,35 @@ Kalshi API credentials go in `.env` (see `.env.example`):
 
 ```bash
 # Pull current Kalshi NBA player prop markets
-uv run python main.py
+uv run kalshi
 
 # Pull current Underdog Fantasy NBA player prop lines
-uv run python underdog.py
+uv run underdog
 
 # Pull current DraftKings NBA player prop over/under odds
-uv run python draftkings.py
+uv run draftkings
 
 # Pull current Pinnacle NBA player prop over/under odds
-uv run python pinnacle.py
+uv run pinnacle
 ```
 
-Both scripts write CSV files that `trade.py` reads from. Run these first to get fresh data, or use `--refresh` on the auto subcommand to fetch inline.
+All scripts write CSV files to `data/` that `trade` reads from. Run these first to get fresh data, or use `--refresh` on the auto subcommand to fetch inline.
 
 ### Manual trading
 
 ```bash
 # Dry run — see what would be placed without executing
-uv run python trade.py --dry-run manual \
+uv run trade --dry-run manual \
   --ticker KXNBAPTS-26FEB10SASLAL-SASVWEMBANYAMA1-35 \
   --action buy --side yes --count 1 --price 5 --type limit
 
 # Place a real limit order (will prompt for confirmation)
-uv run python trade.py manual \
+uv run trade manual \
   --ticker KXNBAPTS-26FEB10SASLAL-SASVWEMBANYAMA1-35 \
   --action buy --side yes --count 1 --price 5 --type limit
 
 # Skip confirmation prompt
-uv run python trade.py --yes manual \
+uv run trade --yes manual \
   --ticker KXNBAPTS-26FEB10SASLAL-SASVWEMBANYAMA1-35 \
   --action buy --side yes --count 1 --price 5 --type limit
 ```
@@ -65,20 +71,20 @@ uv run python trade.py --yes manual \
 
 ```bash
 # Scan for edges (dry run) — finds mispriced markets without trading
-uv run python trade.py --dry-run auto --min-edge 10
+uv run trade --dry-run auto --min-edge 10
 
 # Use a specific odds source (draftkings, pinnacle, or both)
-uv run python trade.py --dry-run auto --source draftkings --min-edge 10
-uv run python trade.py --dry-run auto --source pinnacle --min-edge 10
+uv run trade --dry-run auto --source draftkings --min-edge 10
+uv run trade --dry-run auto --source pinnacle --min-edge 10
 
 # Refresh data from both sources before scanning
-uv run python trade.py --dry-run auto --refresh --min-edge 10
+uv run trade --dry-run auto --refresh --min-edge 10
 
 # Trade detected edges with custom guardrails
-uv run python trade.py auto --min-edge 8 --count 3 --max-contracts 10 --max-spend 2000
+uv run trade auto --min-edge 8 --count 3 --max-contracts 10 --max-spend 2000
 
 # Auto-trade without confirmation prompts
-uv run python trade.py --yes auto --min-edge 10 --count 5
+uv run trade --yes auto --min-edge 10 --count 5
 ```
 
 ### Safety guardrails
@@ -95,6 +101,8 @@ Auto-specific flags:
 
 ### Generated files
 
+All generated files live in `data/`:
+
 - `edges.csv` — Raw data for every detected edge (written on each auto run). Includes Kalshi bid/ask, DraftKings decimal odds, implied probability, and computed edge for manual verification.
 - `trades_log.csv` — Append-only log of every real order placed. Used to deduplicate: subsequent auto runs skip any `(ticker, side)` already in the log. Delete a row (or the whole file) to allow re-trading.
 
@@ -104,7 +112,7 @@ Auto-specific flags:
 - **Edge detection** compares Kalshi ask prices against sportsbook implied probabilities (DraftKings, Pinnacle, or both averaged). `odds_decimal` converts to implied probability as `1 / odds_decimal`, then vig is removed by normalizing over+under.
 - **Threshold matching** between platforms: Kalshi "N+" (>= N) maps to DraftKings "over N-0.5".
 - **Series tickers** identify stat types: KXNBAPTS=Points, KXNBAREB=Rebounds, KXNBAAST=Assists, KXNBA3PT=3-Pointers Made, KXNBASTL=Steals, KXNBABLK=Blocks.
-- **Trade deduplication** — Real (non-dry-run) orders are logged to `trades_log.csv`. On subsequent runs, edges matching an already-traded `(ticker, side)` are skipped automatically.
+- **Trade deduplication** — Real (non-dry-run) orders are logged to `data/trades_log.csv`. On subsequent runs, edges matching an already-traded `(ticker, side)` are skipped automatically.
 
 ## Dependencies
 

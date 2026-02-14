@@ -1,35 +1,31 @@
 import argparse
 import math
 import os
-import re
 import sys
 from datetime import datetime, timezone
 
 import pandas as pd
 from pykalshi import Action, OrderType, Side
 
-from main import get_client, fetch_nba_player_props
-from draftkings import fetch_subcategory, parse_props, SUBCATEGORY_MAP, KALSHI_STATS
-from pinnacle import (
+from src.common import (
+    SERIES_TO_STAT,
+    KALSHI_STATS,
+    KALSHI_CSV,
+    DRAFTKINGS_CSV,
+    PINNACLE_CSV,
+    EDGES_CSV,
+    TRADES_LOG_CSV,
+    parse_kalshi_title,
+)
+from src.main import get_client, fetch_nba_player_props
+from src.draftkings import fetch_subcategory, parse_props, SUBCATEGORY_MAP
+from src.pinnacle import (
     fetch_matchups as pinn_fetch_matchups,
     parse_props as pinn_parse_props,
     fetch_all_prices as pinn_fetch_prices,
     american_to_decimal as pinn_american_to_decimal,
     CATEGORY_MAP as PINN_CATEGORY_MAP,
-    KALSHI_STATS as PINN_KALSHI_STATS,
 )
-
-# Map Kalshi series tickers to Underdog stat names
-SERIES_TO_STAT = {
-    "KXNBAPTS": "Points",
-    "KXNBAREB": "Rebounds",
-    "KXNBAAST": "Assists",
-    "KXNBA3PT": "3-Pointers Made",
-    "KXNBASTL": "Steals",
-    "KXNBABLK": "Blocks",
-}
-
-TRADES_LOG = "trades_log.csv"
 
 # Kalshi fee coefficients (per their fee schedule)
 TAKER_FEE_COEFF = 0.07
@@ -47,9 +43,9 @@ def estimate_fee(price_cents, count, coeff=TAKER_FEE_COEFF):
 
 def load_traded_keys():
     """Load the set of (ticker, side) pairs already traded."""
-    if not os.path.exists(TRADES_LOG):
+    if not os.path.exists(TRADES_LOG_CSV):
         return set()
-    df = pd.read_csv(TRADES_LOG)
+    df = pd.read_csv(TRADES_LOG_CSV)
     return set(zip(df["ticker"], df["side"]))
 
 
@@ -64,8 +60,8 @@ def log_trade(ticker, action, side, count, order_type, price):
         "order_type": order_type.value,
         "price": price,
     }])
-    header = not os.path.exists(TRADES_LOG)
-    row.to_csv(TRADES_LOG, mode="a", header=header, index=False)
+    header = not os.path.exists(TRADES_LOG_CSV)
+    row.to_csv(TRADES_LOG_CSV, mode="a", header=header, index=False)
 
 
 def place_trade(client, ticker, action, side, count, order_type, price, dry_run=False):
@@ -100,17 +96,6 @@ def place_trade(client, ticker, action, side, count, order_type, price, dry_run=
     return order
 
 
-def parse_kalshi_title(title):
-    """Extract player name and threshold from a Kalshi market title.
-
-    Example: 'Victor Wembanyama: 35+ points' -> ('Victor Wembanyama', 35)
-    """
-    match = re.match(r"^(.+?):\s*(\d+)\+\s+\w+", title)
-    if not match:
-        return None, None
-    return match.group(1).strip(), int(match.group(2))
-
-
 def _compute_vig_free_implied(matches):
     """Compute vig-free implied probabilities for over/under rows.
 
@@ -141,10 +126,106 @@ def _load_book_df(source):
     """Load sportsbook CSV(s) based on source. Returns list of (label, DataFrame) pairs."""
     dfs = []
     if source in ("draftkings", "both"):
-        dfs.append(("dk", pd.read_csv("draftkings_nba_props.csv")))
+        dfs.append(("dk", pd.read_csv(DRAFTKINGS_CSV)))
     if source in ("pinnacle", "both"):
-        dfs.append(("pinn", pd.read_csv("pinnacle_nba_props.csv")))
+        dfs.append(("pinn", pd.read_csv(PINNACLE_CSV)))
     return dfs
+
+
+def _parse_kalshi_market(row):
+    """Extract player, stat, threshold, and prices from a Kalshi market row.
+
+    Returns a dict with the parsed fields, or None if the row is invalid.
+    """
+    player_name, threshold = parse_kalshi_title(row["title"])
+    if player_name is None:
+        return None
+
+    series = row.get("series_ticker", "")
+    if not series or (isinstance(series, float) and pd.isna(series)):
+        series = row["ticker"].split("-")[0]
+    stat_name = SERIES_TO_STAT.get(series)
+    if not stat_name:
+        return None
+
+    yes_ask = row.get("yes_ask")
+    no_ask = row.get("no_ask")
+    if pd.isna(yes_ask) or pd.isna(no_ask) or yes_ask == 0 or no_ask == 0:
+        return None
+
+    return {
+        "ticker": row["ticker"],
+        "player": player_name,
+        "stat": stat_name,
+        "threshold": threshold,
+        "yes_ask": yes_ask,
+        "no_ask": no_ask,
+    }
+
+
+def _lookup_book_implied(market, book_dfs):
+    """Look up vig-free implied probabilities across sportsbooks for a market.
+
+    Returns a dict: label -> {choice -> implied_prob}, e.g. {"dk": {"over": 55.2, "under": 44.8}}.
+    """
+    book_threshold = market["threshold"] - 0.5
+    player_lower = market["player"].lower()
+    stat_lower = market["stat"].lower()
+
+    book_implied = {}
+    for label, df in book_dfs:
+        matches = df[
+            (df["full_name"].str.lower() == player_lower)
+            & (df["stat_name"].str.lower() == stat_lower)
+            & (df["stat_value"] == book_threshold)
+        ]
+        implied = _compute_vig_free_implied(matches)
+        if implied:
+            book_implied[label] = implied
+    return book_implied
+
+
+def _compute_edge(market, book_implied, source):
+    """Compute edges for a single market given sportsbook implied probabilities.
+
+    Returns a list of edge dicts (one per side that exceeds 0), or empty list.
+    """
+    edges = []
+    for choice in ("over", "under"):
+        implieds = {label: imp[choice] for label, imp in book_implied.items() if choice in imp}
+        if not implieds:
+            continue
+
+        avg_implied = sum(implieds.values()) / len(implieds)
+        kalshi_price = market["yes_ask"] if choice == "over" else market["no_ask"]
+        edge_val = avg_implied - kalshi_price
+
+        base = {
+            "ticker": market["ticker"],
+            "player": market["player"],
+            "stat": market["stat"],
+            "threshold": market["threshold"],
+            "kalshi_yes_ask": market["yes_ask"],
+            "kalshi_no_ask": market["no_ask"],
+            "choice": choice,
+        }
+
+        if source == "both":
+            base["dk_implied"] = round(implieds["dk"], 1) if "dk" in implieds else ""
+            base["pinn_implied"] = round(implieds["pinn"], 1) if "pinn" in implieds else ""
+            base["avg_implied"] = round(avg_implied, 1)
+        elif source == "draftkings":
+            base["dk_implied"] = round(avg_implied, 1)
+        elif source == "pinnacle":
+            base["pinn_implied"] = round(avg_implied, 1)
+
+        edges.append({
+            **base,
+            "side": "yes" if choice == "over" else "no",
+            "kalshi_price": kalshi_price,
+            "edge": round(edge_val, 1),
+        })
+    return edges
 
 
 def find_edges(kalshi_csv, min_edge, source="both"):
@@ -157,86 +238,18 @@ def find_edges(kalshi_csv, min_edge, source="both"):
     book_dfs = _load_book_df(source)
 
     edges = []
-
     for _, row in kalshi_df.iterrows():
-        player_name, threshold = parse_kalshi_title(row["title"])
-        if player_name is None:
+        market = _parse_kalshi_market(row)
+        if not market:
             continue
 
-        series = row.get("series_ticker", "")
-        if not series or (isinstance(series, float) and pd.isna(series)):
-            series = row["ticker"].split("-")[0]
-        stat_name = SERIES_TO_STAT.get(series)
-        if not stat_name:
-            continue
-
-        yes_ask = row.get("yes_ask")
-        no_ask = row.get("no_ask")
-        if pd.isna(yes_ask) or pd.isna(no_ask) or yes_ask == 0 or no_ask == 0:
-            continue
-
-        book_threshold = threshold - 0.5
-
-        # Collect vig-free implied probabilities from each book
-        book_implied = {}  # label -> {choice -> implied_prob}
-        for label, df in book_dfs:
-            matches = df[
-                (df["full_name"].str.lower() == player_name.lower())
-                & (df["stat_name"].str.lower() == stat_name.lower())
-                & (df["stat_value"] == book_threshold)
-            ]
-            implied = _compute_vig_free_implied(matches)
-            if implied:
-                book_implied[label] = implied
-
+        book_implied = _lookup_book_implied(market, book_dfs)
         if not book_implied:
             continue
 
-        for choice in ("over", "under"):
-            # Gather implied values from each book for this choice
-            implieds = {}
-            for label, imp in book_implied.items():
-                if choice in imp:
-                    implieds[label] = imp[choice]
-
-            if not implieds:
-                continue
-
-            avg_implied = sum(implieds.values()) / len(implieds)
-
-            kalshi_price = yes_ask if choice == "over" else no_ask
-            side = "yes" if choice == "over" else "no"
-            edge_val = avg_implied - kalshi_price
-
-            if edge_val < min_edge:
-                continue
-
-            base = {
-                "ticker": row["ticker"],
-                "player": player_name,
-                "stat": stat_name,
-                "threshold": threshold,
-                "kalshi_yes_ask": yes_ask,
-                "kalshi_no_ask": no_ask,
-                "choice": choice,
-            }
-
-            # Add per-book implied columns
-            if source == "both":
-                base["dk_implied"] = round(implieds["dk"], 1) if "dk" in implieds else ""
-                base["pinn_implied"] = round(implieds["pinn"], 1) if "pinn" in implieds else ""
-                base["avg_implied"] = round(avg_implied, 1)
-            elif source == "draftkings":
-                base["dk_implied"] = round(avg_implied, 1)
-            elif source == "pinnacle":
-                base["pinn_implied"] = round(avg_implied, 1)
-
-            edges.append({
-                **base,
-                "side": side,
-                "kalshi_price": kalshi_price,
-                "edge": round(edge_val, 1),
-            })
+        for edge in _compute_edge(market, book_implied, source):
+            if edge["edge"] >= min_edge:
+                edges.append(edge)
 
     edges_df = pd.DataFrame(edges)
     if not edges_df.empty:
@@ -287,7 +300,7 @@ def execute_edge_trades(client, edges_df, count, order_type, max_contracts, max_
             traded_keys.add(key)
 
     if skipped:
-        print(f"\nSkipped {skipped} edge(s) already traded (see {TRADES_LOG})")
+        print(f"\nSkipped {skipped} edge(s) already traded (see {TRADES_LOG_CSV})")
     print(f"Total spend this run: {total_spend}¢ (${total_spend / 100:.2f})")
     fees_pct = (total_fees / total_spend * 100) if total_spend > 0 else 0
     print(f"Total est fees:       {total_fees}¢ (${total_fees / 100:.2f}) [{fees_pct:.1f}% of spend, taker]")
@@ -325,8 +338,8 @@ def refresh_data(source="both"):
 
     print("Refreshing Kalshi markets...")
     kalshi_df = fetch_nba_player_props(client)
-    kalshi_df.to_csv("nba_player_props.csv", index=False)
-    print(f"  {len(kalshi_df)} markets saved to nba_player_props.csv")
+    kalshi_df.to_csv(KALSHI_CSV, index=False)
+    print(f"  {len(kalshi_df)} markets saved to {KALSHI_CSV}")
     
     if source in ("pinnacle", "both"):
         print("Refreshing Pinnacle lines...")
@@ -337,7 +350,7 @@ def refresh_data(source="both"):
         else:
             props["stat_name"] = props["category"].map(PINN_CATEGORY_MAP)
             props = props.dropna(subset=["stat_name"])
-            props = props[props["stat_name"].isin(PINN_KALSHI_STATS)]
+            props = props[props["stat_name"].isin(KALSHI_STATS)]
             if props.empty:
                 print("  No Kalshi-supported Pinnacle props found.")
             else:
@@ -350,8 +363,8 @@ def refresh_data(source="both"):
                     merged["odds_decimal"] = merged["odds_american"].apply(pinn_american_to_decimal)
                     result = merged[["player", "stat_name", "stat_value", "choice", "odds_decimal", "odds_american"]].copy()
                     result = result.rename(columns={"player": "full_name"})
-                    result.to_csv("pinnacle_nba_props.csv", index=False)
-                    print(f"  {len(result)} lines saved to pinnacle_nba_props.csv")
+                    result.to_csv(PINNACLE_CSV, index=False)
+                    print(f"  {len(result)} lines saved to {PINNACLE_CSV}")
 
     if source in ("draftkings", "both"):
         print("Refreshing DraftKings lines...")
@@ -366,8 +379,8 @@ def refresh_data(source="both"):
                 print(f"  {stat_name} (subcategory {subcategory_id}): error — {e}")
         dk_df = pd.DataFrame(all_rows)
         if len(dk_df) > 0:
-            dk_df.to_csv("draftkings_nba_props.csv", index=False)
-        print(f"  {len(dk_df)} lines saved to draftkings_nba_props.csv")
+            dk_df.to_csv(DRAFTKINGS_CSV, index=False)
+        print(f"  {len(dk_df)} lines saved to {DRAFTKINGS_CSV}")
 
 
 def cmd_auto(args):
@@ -379,7 +392,7 @@ def cmd_auto(args):
         print()
 
     print(f"Scanning for edges (source: {args.source})...")
-    edges_df = find_edges("nba_player_props.csv", args.min_edge, source=args.source)
+    edges_df = find_edges(KALSHI_CSV, args.min_edge, source=args.source)
 
     if edges_df.empty:
         print("No edges found.")
@@ -388,8 +401,8 @@ def cmd_auto(args):
     print(f"Found {len(edges_df)} edge(s):\n")
     print(edges_df.to_string(index=False))
 
-    edges_df.to_csv("edges.csv", index=False)
-    print(f"\nRaw edge data saved to edges.csv")
+    edges_df.to_csv(EDGES_CSV, index=False)
+    print(f"\nRaw edge data saved to {EDGES_CSV}")
     print()
 
     client = None if args.dry_run else get_client()

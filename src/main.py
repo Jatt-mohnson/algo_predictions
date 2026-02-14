@@ -4,7 +4,9 @@ import pandas as pd
 from dotenv import load_dotenv
 from pykalshi import KalshiClient, MarketStatus, to_dataframe
 
-load_dotenv()
+from src.common import KALSHI_CSV, _PROJECT_ROOT
+
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
 
 NBA_PLAYER_PROP_SERIES = [
     "KXNBAPTS",  # Points
@@ -45,7 +47,7 @@ def main():
 
     print("Fetching NBA player prop markets...")
     df = fetch_nba_player_props(client)
-    df.to_csv("nba_player_props.csv", index=False)
+    df.to_csv(KALSHI_CSV, index=False)
     print(f"Found {len(df)} open player prop markets")
 
 

@@ -2,6 +2,8 @@ import requests
 import pandas as pd
 from urllib.parse import quote
 
+from src.common import KALSHI_STATS, DRAFTKINGS_CSV
+
 BASE_URL = "https://sportsbook-nash.draftkings.com/sites/US-SB/api/sportscontent/controldata/league/leagueSubcategory/v1/markets"
 LEAGUE_ID = "42648"  # NBA
 
@@ -25,9 +27,6 @@ SUBCATEGORY_MAP = {
     12502: "Turnovers",
     12504: "Turnovers",
 }
-
-# Only keep stats that Kalshi supports
-KALSHI_STATS = {"Points", "Rebounds", "Assists", "3-Pointers Made", "Steals", "Blocks"}
 
 
 def build_url(subcategory_id: int) -> str:
@@ -104,9 +103,9 @@ def main():
 
     df = pd.DataFrame(all_rows)
     if len(df) > 0:
-        df.to_csv("draftkings_nba_props.csv", index=False)
+        df.to_csv(DRAFTKINGS_CSV, index=False)
     print(f"Found {len(df)} NBA player prop lines")
-    print("Saved to draftkings_nba_props.csv")
+    print(f"Saved to {DRAFTKINGS_CSV}")
 
 
 if __name__ == "__main__":

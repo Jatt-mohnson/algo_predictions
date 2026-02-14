@@ -1,6 +1,8 @@
 import requests
 import pandas as pd
 
+from src.common import KALSHI_STATS, PINNACLE_CSV
+
 BASE_URL = "https://guest.api.arcadia.pinnacle.com/0.1"
 LEAGUE_ID = 487  # NBA
 
@@ -8,9 +10,6 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "x-api-key": "CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R",
 }
-
-# Only keep stats that Kalshi supports
-KALSHI_STATS = {"Points", "Rebounds", "Assists", "3-Pointers Made", "Steals", "Blocks"}
 
 # Map Pinnacle category names to Kalshi stat names
 CATEGORY_MAP = {
@@ -126,9 +125,9 @@ def main():
         count = len(result[result["stat_name"] == stat])
         print(f"  {stat}: {count} lines")
 
-    result.to_csv("pinnacle_nba_props.csv", index=False)
+    result.to_csv(PINNACLE_CSV, index=False)
     print(f"Found {len(result)} NBA player prop lines")
-    print("Saved to pinnacle_nba_props.csv")
+    print(f"Saved to {PINNACLE_CSV}")
 
 
 if __name__ == "__main__":
