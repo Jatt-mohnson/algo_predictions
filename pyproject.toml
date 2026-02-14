@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pykalshi[dataframe]>=0.3.6",
     "python-dotenv>=1.2.1",
+    "rich>=13.0",
 ]
 
 [build-system]
@@ -23,3 +24,4 @@ draftkings = "src.draftkings:main"
 pinnacle = "src.pinnacle:main"
 trade = "src.trade:main"
 compare = "src.compare:main"
+dashboard = "src.dashboard:main"
