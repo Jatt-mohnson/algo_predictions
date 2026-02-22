@@ -5,7 +5,9 @@ instead of relying on locally-computed P&L.
 """
 
 import argparse
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 
 from rich.console import Console
 from rich.panel import Panel
@@ -34,6 +36,50 @@ def _fee_cents(fee_cost):
     if not fee_cost:
         return 0
     return round(float(fee_cost) * 100)
+
+
+def _parse_since(since_str):
+    """Parse a --since value into a UTC datetime cutoff.
+
+    Accepts: 'today', '<N>d' (e.g. '7d'), or an ISO date like '2026-02-01'.
+    Returns None if since_str is None.
+    """
+    if since_str is None:
+        return None
+    s = since_str.strip().lower()
+    now = datetime.now(timezone.utc)
+    if s == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    m = re.fullmatch(r"(\d+)d", s)
+    if m:
+        return now - timedelta(days=int(m.group(1)))
+    # Try ISO date
+    try:
+        dt = datetime.strptime(since_str.strip(), "%Y-%m-%d")
+        return dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError(
+        f"Invalid --since value '{since_str}'. Use 'today', '<N>d' (e.g. '7d'), or a date like '2026-02-01'."
+    )
+
+
+def _filter_fills_since(fills, cutoff):
+    """Filter fills to only those created on or after the cutoff datetime."""
+    if cutoff is None:
+        return fills
+    filtered = []
+    for f in fills:
+        if not f.created_time:
+            continue
+        # created_time is an ISO string like '2026-02-10T...'
+        try:
+            ft = datetime.fromisoformat(f.created_time.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        if ft >= cutoff:
+            filtered.append(f)
+    return filtered
 
 
 def fetch_data(client):
@@ -333,18 +379,63 @@ def render_cumulative_chart(settlements_by_ticker):
 def main():
     parser = argparse.ArgumentParser(description="Trade performance dashboard")
     parser.add_argument("--no-fetch", action="store_true", help="Skip Kalshi API calls (show empty dashboard)")
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="Only show trades from this point onward. Accepts 'today', '<N>d' (e.g. '7d', '30d'), or a date like '2026-02-01'.",
+    )
+    parser.add_argument(
+        "--date",
+        default=None,
+        help="Only show trades from a specific date. Accepts a date like '2026-02-10'.",
+    )
     args = parser.parse_args()
+
+    if args.since and args.date:
+        console.print("[red]Cannot use --since and --date together.[/red]")
+        sys.exit(1)
 
     if args.no_fetch:
         console.print("[yellow]--no-fetch specified. Nothing to display without API access.[/yellow]")
         sys.exit(0)
 
+    cutoff = _parse_since(args.since)
+    date_filter = None
+    if args.date:
+        try:
+            date_filter = datetime.strptime(args.date.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            console.print(f"[red]Invalid --date value '{args.date}'. Use a date like '2026-02-10'.[/red]")
+            sys.exit(1)
+
     client = get_client()
     fills, settlements_by_ticker, market_titles = fetch_data(client)
 
+    fills = _filter_fills_since(fills, cutoff)
+    if date_filter:
+        fills = [
+            f for f in fills
+            if f.created_time
+            and datetime.fromisoformat(f.created_time.replace("Z", "+00:00")).astimezone().date() == date_filter
+        ]
+    if cutoff or date_filter:
+        # Restrict settlements to only tickers present in the filtered fills
+        relevant_tickers = {f.ticker for f in fills}
+        settlements_by_ticker = {k: v for k, v in settlements_by_ticker.items() if k in relevant_tickers}
+
     if not fills:
-        console.print("[red]No NBA player prop fills found on your account.[/red]")
+        msg = "No NBA player prop fills found"
+        if date_filter:
+            msg += f" on {date_filter.isoformat()}"
+        elif cutoff:
+            msg += f" since {cutoff.strftime('%Y-%m-%d')}"
+        console.print(f"[red]{msg}.[/red]")
         sys.exit(1)
+
+    if date_filter:
+        console.print(f"\n[bold]Showing trades on {date_filter.isoformat()}[/bold]")
+    elif cutoff:
+        console.print(f"\n[bold]Showing trades since {cutoff.strftime('%Y-%m-%d')}[/bold]")
 
     console.print()
     render_portfolio_summary(fills, settlements_by_ticker)
