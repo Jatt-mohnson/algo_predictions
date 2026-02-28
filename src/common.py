@@ -36,6 +36,25 @@ CBB_PINNACLE_CSV = os.path.join(DATA_DIR, "cbb_pinnacle.csv")
 CBB_EDGES_CSV = os.path.join(DATA_DIR, "cbb_edges.csv")
 
 
+# Known nickname/alias → canonical name mappings for cross-source player matching.
+# Add entries here whenever a player's name differs between sources.
+# All keys and values must be lowercase.
+PLAYER_ALIASES: dict[str, str] = {
+    "herb jones": "herbert jones",
+    "bub carrington": "carlton carrington",
+}
+
+
+def normalize_player_name(name: str) -> str:
+    """Normalize a player name for cross-source matching.
+
+    Lowercases and strips whitespace, then resolves known nicknames/aliases
+    to a canonical form so joins across data sources succeed.
+    """
+    key = name.lower().strip()
+    return PLAYER_ALIASES.get(key, key)
+
+
 def parse_kalshi_title(title):
     """Extract player name and threshold from a Kalshi market title.
 
