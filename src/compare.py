@@ -1,53 +1,36 @@
-"""Join all data sources into a single comparison view.
+"""Join Underdog, DraftKings, and Pinnacle into a single comparison view.
 
-Reads CSV files from Kalshi, Underdog, DraftKings, and Pinnacle and produces
-a unified table showing each player/stat/threshold with odds from every source.
+Reads CSV files from Underdog, DraftKings, and Pinnacle and produces a unified
+table showing each player/stat/threshold with odds from every source.
 
 Output: combined_odds.csv
+
+Usage:
+  uv run compare                      # default base: underdog (left join)
+  uv run compare --base draftkings    # DraftKings rows drive the output
+  uv run compare --base pinnacle
+  uv run compare --base none          # outer join — all rows from all sources
 """
 
+import argparse
 import os
 import sys
 
 import pandas as pd
 
 from src.common import (
-    SERIES_TO_STAT,
-    KALSHI_CSV,
     DRAFTKINGS_CSV,
     PINNACLE_CSV,
     UNDERDOG_CSV,
     COMBINED_CSV,
-    parse_kalshi_title,
+    normalize_player_name,
 )
 
-
-def load_kalshi(path=KALSHI_CSV):
-    if not os.path.exists(path):
-        return pd.DataFrame()
-    df = pd.read_csv(path)
-    rows = []
-    for _, row in df.iterrows():
-        player, threshold = parse_kalshi_title(row["title"])
-        if player is None:
-            continue
-        series = row.get("series_ticker", "")
-        if not series or (isinstance(series, float) and pd.isna(series)):
-            series = row["ticker"].split("-")[0]
-        stat = SERIES_TO_STAT.get(series)
-        if not stat:
-            continue
-        rows.append({
-            "player": player,
-            "stat": stat,
-            "threshold": threshold,
-            "ticker": row["ticker"],
-            "kalshi_yes_bid": row.get("yes_bid"),
-            "kalshi_yes_ask": row.get("yes_ask"),
-            "kalshi_no_bid": row.get("no_bid"),
-            "kalshi_no_ask": row.get("no_ask"),
-        })
-    return pd.DataFrame(rows)
+BOOKS = {
+    "underdog": (UNDERDOG_CSV, "ud"),
+    "draftkings": (DRAFTKINGS_CSV, "dk"),
+    "pinnacle": (PINNACLE_CSV, "pinn"),
+}
 
 
 def load_sportsbook(path, label):
@@ -76,47 +59,65 @@ def load_sportsbook(path, label):
 
 
 def main():
-    kalshi = load_kalshi()
-    if kalshi.empty:
-        print("No Kalshi data found. Run main.py first.")
+    parser = argparse.ArgumentParser(description="Compare odds across Underdog, DraftKings, and Pinnacle.")
+    parser.add_argument(
+        "--base",
+        choices=["underdog", "draftkings", "pinnacle", "none"],
+        default="underdog",
+        help="Which book drives the rows (left join). Use 'none' for an outer join of all sources. (default: underdog)",
+    )
+    args = parser.parse_args()
+
+    loaded = {name: load_sportsbook(path, label) for name, (path, label) in BOOKS.items()}
+
+    if all(df.empty for df in loaded.values()):
+        print("No data found. Run draftkings, pinnacle, and/or underdog scripts first.")
         sys.exit(1)
 
-    # Sportsbook thresholds are N-0.5 where Kalshi uses N+
-    # Create a join key on sportsbook side: threshold + 0.5 maps to Kalshi threshold
-    dk = load_sportsbook(DRAFTKINGS_CSV, "dk")
-    pinn = load_sportsbook(PINNACLE_CSV, "pinn")
-    ud = load_sportsbook(UNDERDOG_CSV, "ud")
+    use_outer = args.base == "none"
+    join_how = "outer" if use_outer else "left"
 
-    for book_df in [dk, pinn, ud]:
-        if not book_df.empty:
-            book_df["threshold"] = book_df["threshold"] + 0.5
+    if not use_outer:
+        base_name = args.base
+        if loaded[base_name].empty:
+            print(f"No data for base book '{base_name}'. Run the corresponding fetch script first.")
+            sys.exit(1)
+        print(f"Base: {base_name} ({join_how} join)")
+        combined = loaded[base_name].copy()
+    else:
+        print("Base: none (outer join — all rows from all sources)")
+        # Seed with first non-empty source
+        combined = next(df.copy() for df in loaded.values() if not df.empty)
 
-    # Start with Kalshi as the base
-    combined = kalshi.copy()
-
-    # Merge each sportsbook
-    join_cols = ["player", "stat", "threshold"]
-    for book_df in [dk, pinn, ud]:
-        if book_df.empty:
+    for name, df in loaded.items():
+        if not use_outer and name == args.base:
             continue
-        # Normalize player names for matching
-        book_df["_join_player"] = book_df["player"].str.lower().str.strip()
-        combined["_join_player"] = combined["player"].str.lower().str.strip()
+        if df.empty:
+            continue
+
+        df = df.copy()
+        df["_join_player"] = df["player"].apply(normalize_player_name)
+        combined["_join_player"] = combined["player"].apply(normalize_player_name)
+        df["_join_stat"] = df["stat"].str.lower().str.strip()
         combined["_join_stat"] = combined["stat"].str.lower().str.strip()
-        book_df["_join_stat"] = book_df["stat"].str.lower().str.strip()
 
         combined = combined.merge(
-            book_df.drop(columns=["player", "stat"]),
+            df.drop(columns=["player", "stat"]),
             left_on=["_join_player", "_join_stat", "threshold"],
             right_on=["_join_player", "_join_stat", "threshold"],
-            how="left",
+            how=join_how,
         )
         combined = combined.drop(columns=["_join_player", "_join_stat"], errors="ignore")
 
+        # Consolidate player/stat columns produced by outer joins
+        if "player_x" in combined.columns:
+            combined["player"] = combined["player_x"].combine_first(combined["player_y"])
+            combined["stat"] = combined["stat_x"].combine_first(combined["stat_y"])
+            combined = combined.drop(columns=["player_x", "player_y", "stat_x", "stat_y"])
+
     # Order columns nicely
     desired_order = [
-        "player", "stat", "threshold", "ticker",
-        "kalshi_yes_bid", "kalshi_yes_ask", "kalshi_no_bid", "kalshi_no_ask",
+        "player", "stat", "threshold",
         "dk_over", "dk_under",
         "pinn_over", "pinn_under",
         "ud_over", "ud_under",
@@ -130,10 +131,9 @@ def main():
 
     # Show summary of data coverage
     total = len(combined)
-    for col in ["dk_over", "pinn_over", "ud_over"]:
+    for col, label in [("dk_over", "DraftKings"), ("pinn_over", "Pinnacle"), ("ud_over", "Underdog")]:
         if col in combined.columns:
             matched = combined[col].notna().sum()
-            label = col.replace("_over", "").upper()
             print(f"  {label} matched: {matched}/{total}")
 
 
