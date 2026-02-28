@@ -29,8 +29,9 @@ def parse_nba_props(data: dict) -> pd.DataFrame:
         appearances, on=["player_id", "position_id", "team_id"], how="inner"
     )
 
-    # Expand the nested options list into rows
+    # Expand the nested options list into rows; drop any rows where options is null/empty
     lines = over_under_lines.explode("options").reset_index(drop=True)
+    lines = lines[lines["options"].apply(lambda x: isinstance(x, dict))].reset_index(drop=True)
     options_df = pd.json_normalize(lines["options"])
 
     # Rename overlapping columns from options before concat
