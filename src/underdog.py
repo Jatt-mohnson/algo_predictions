@@ -21,6 +21,17 @@ def parse_nba_props(data: dict) -> pd.DataFrame:
     appearances = pd.DataFrame(data["appearances"]).rename(columns={"id": "appearance_id"})
     over_under_lines = pd.DataFrame(data["over_under_lines"])
 
+    # Join game matchup info (e.g. "POR @ CHA") onto appearances via match_id
+    games_raw = data.get("games", [])
+    if games_raw:
+        games = pd.DataFrame(games_raw).rename(columns={"id": "match_id"})
+        if "abbreviated_title" in games.columns and "match_id" in appearances.columns:
+            appearances = appearances.merge(
+                games[["match_id", "abbreviated_title"]],
+                on="match_id",
+                how="left",
+            ).rename(columns={"abbreviated_title": "matchup"})
+
     # Filter to NBA players only
     players = players[players["sport_id"] == "NBA"]
 
@@ -68,7 +79,7 @@ def parse_nba_props(data: dict) -> pd.DataFrame:
 
     # Keep useful columns
     keep_cols = [
-        "full_name", "position_name", "team_id", "stat_name",
+        "full_name", "position_name", "team_id", "matchup", "stat_name",
         "stat_value", "choice", "payout_multiplier",
     ]
     existing = [c for c in keep_cols if c in props.columns]

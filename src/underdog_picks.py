@@ -31,6 +31,7 @@ from src.common import (
     DATA_DIR,
     parse_kalshi_title,
     normalize_player_name,
+    adjust_prob_for_threshold,
 )
 
 UNDERDOG_PICKS_CSV = os.path.join(DATA_DIR, "underdog_picks.csv")
@@ -293,8 +294,13 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
     ud["_join_player"] = ud["full_name"].apply(normalize_player_name)
     ud["_join_stat"] = ud["stat_name"].str.lower().str.strip()
 
+    has_matchup = "matchup" in ud.columns
+    over_ud_cols = ["_join_player", "_join_stat", "threshold", "payout_multiplier"]
+    if has_matchup:
+        over_ud_cols.append("matchup")
+
     over_ud = (
-        ud[ud["choice"] == "over"][["_join_player", "_join_stat", "threshold", "payout_multiplier"]]
+        ud[ud["choice"] == "over"][over_ud_cols]
         .rename(columns={"payout_multiplier": "ud_over_mult"})
     )
     under_ud = (
@@ -306,8 +312,69 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
     if debug:
         print(f"[debug] Underdog pivot rows: {len(ud_pivot)}")
 
+    # Pass 1: exact threshold match
     joined = probs.merge(ud_pivot, on=["_join_player", "_join_stat", "threshold"], how="inner")
-    joined = joined.drop(columns=["_join_player", "_join_stat"])
+
+    # Pass 2: Poisson-adjusted fuzzy fallback for UD rows that didn't match
+    # (e.g. UD at 14.5 → threshold 15, source at 15.5 → threshold 16)
+    unmatched_ud = ud_pivot[
+        ~ud_pivot.set_index(["_join_player", "_join_stat", "threshold"]).index.isin(
+            joined.set_index(["_join_player", "_join_stat", "threshold"]).index
+        )
+    ]
+    if not unmatched_ud.empty:
+        # Build a lookup from the source probs by (player, stat)
+        prob_by_key: dict[tuple, pd.DataFrame] = {}
+        for (jp, js), grp in probs.groupby(["_join_player", "_join_stat"]):
+            prob_by_key[(jp, js)] = grp
+
+        fuzzy_rows = []
+        for _, ud_row in unmatched_ud.iterrows():
+            jp = ud_row["_join_player"]
+            js = ud_row["_join_stat"]
+            ud_thresh = int(ud_row["threshold"])
+
+            src_grp = prob_by_key.get((jp, js))
+            if src_grp is None:
+                continue
+
+            src_grp = src_grp.copy()
+            src_grp["_diff"] = (src_grp["threshold"].astype(int) - ud_thresh).abs()
+            close = src_grp[src_grp["_diff"] <= 1]
+            if close.empty:
+                continue
+
+            best = close.loc[close["_diff"].idxmin()]
+            src_thresh = int(best["threshold"])
+            if src_thresh == ud_thresh:
+                continue  # exact match would have been caught above
+
+            # Adjust source probabilities from src_thresh to ud_thresh.
+            # Thresholds here are already integers (ceil of stat_value + 0.5),
+            # so pass them directly — math.ceil(int) == int.
+            adj_over = adjust_prob_for_threshold(
+                float(best["over_prob"]) / 100.0, src_thresh, ud_thresh
+            )
+            if adj_over is None:
+                continue
+            adj_under = 1.0 - adj_over
+
+            row = best.to_dict()
+            row["over_prob"] = round(adj_over * 100, 1)
+            row["under_prob"] = round(adj_under * 100, 1)
+            row["threshold"] = ud_thresh
+            row["ud_over_mult"] = ud_row["ud_over_mult"]
+            row["ud_under_mult"] = ud_row["ud_under_mult"]
+            row["_threshold_adj"] = True
+            if has_matchup:
+                row["matchup"] = ud_row.get("matchup")
+            fuzzy_rows.append(row)
+
+        if fuzzy_rows:
+            fuzzy_df = pd.DataFrame(fuzzy_rows)
+            joined = pd.concat([joined, fuzzy_df], ignore_index=True)
+
+    joined = joined.drop(columns=["_join_player", "_join_stat"], errors="ignore")
 
     if debug:
         print(f"[debug] Rows after join: {len(joined)}")
@@ -320,9 +387,13 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
     has_ticker = "ticker" in joined.columns
 
     picks = []
+    has_matchup = "matchup" in joined.columns
+
     for _, row in joined.iterrows():
         threshold_label = f"{int(row['threshold'])}+"
         ticker = row["ticker"] if has_ticker else ""
+        matchup = row.get("matchup", "") if has_matchup else ""
+        prob_adj = bool(row.get("_threshold_adj", False))
 
         for side, prob_col, mult_col in [
             ("over", "over_prob", "ud_over_mult"),
@@ -339,12 +410,14 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
                 edge = prob - base_be
                 entry = {
                     "player": row.get("player", row.get("full_name", "")),
+                    "matchup": matchup,
                     "stat": row.get("stat", row.get("stat_name", "")),
                     "threshold": threshold_label,
                     "ud_pick": side,
                     "prob": prob,
                     "required_prob": round(base_be, 1),
                     "edge": round(edge, 1),
+                    "prob_adj": prob_adj,
                 }
             else:
                 if pd.isna(mult) or mult <= 0:
@@ -353,6 +426,7 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
                 edge = prob - req
                 entry = {
                     "player": row.get("player", row.get("full_name", "")),
+                    "matchup": matchup,
                     "stat": row.get("stat", row.get("stat_name", "")),
                     "threshold": threshold_label,
                     "ud_pick": side,
@@ -360,6 +434,7 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
                     "prob": prob,
                     "required_prob": round(req, 1),
                     "edge": round(edge, 1),
+                    "prob_adj": prob_adj,
                 }
             if has_ticker:
                 entry["ticker"] = ticker
