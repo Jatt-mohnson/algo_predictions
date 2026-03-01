@@ -520,6 +520,22 @@ def refresh_data(source: str = "kalshi"):
     print(f"  Saved {len(ud_df)} rows to {UNDERDOG_CSV}")
 
 
+def load_previous_pick_keys(path: str = UNDERDOG_PICKS_CSV) -> set[tuple]:
+    """Return (player, stat, threshold, ud_pick) tuples from the last saved run."""
+    if not os.path.exists(path):
+        return set()
+    try:
+        df = pd.read_csv(path)
+        if df.empty:
+            return set()
+        cols = ["player", "stat", "threshold", "ud_pick"]
+        if not all(c in df.columns for c in cols):
+            return set()
+        return set(zip(df["player"], df["stat"], df["threshold"].astype(str), df["ud_pick"]))
+    except Exception:
+        return set()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Find +EV Underdog Fantasy legs using an external probability source.",
@@ -580,6 +596,8 @@ Examples:
         print(f"  e.g. 0.75x leg needs {base_be/0.75:.1f}%  |  1.1x leg needs {base_be/1.1:.1f}%")
         print(f"Scanning for picks with edge >= {args.min_edge}pp...\n")
 
+    prev_keys = load_previous_pick_keys()
+
     picks = find_picks(
         legs=args.legs, payout=payout, source=args.source,
         min_edge=args.min_edge, standard=args.standard, debug=args.debug,
@@ -589,10 +607,32 @@ Examples:
         print("No picks found above their required probability.")
         return
 
+    # Mark picks that weren't in the last saved run
+    if prev_keys:
+        picks["new"] = picks.apply(
+            lambda r: (r["player"], r["stat"], str(r["threshold"]), r["ud_pick"]) not in prev_keys,
+            axis=1,
+        )
+        # Sort: new picks first, then by edge descending
+        picks = picks.sort_values(["new", "edge"], ascending=[False, False]).reset_index(drop=True)
+        new_count = picks["new"].sum()
+    else:
+        picks["new"] = False
+        new_count = 0
+
     display = picks if top is None else picks.head(top)
     label = f"top {len(display)}" if top is not None else "all"
-    print(f"Found {len(picks)} pick(s) | showing {label}:\n")
-    print(display.to_string(index=False))
+
+    if prev_keys:
+        print(f"Found {len(picks)} pick(s) | showing {label} | {new_count} new since last run:\n")
+    else:
+        print(f"Found {len(picks)} pick(s) | showing {label}:\n")
+
+    # Replace boolean with readable marker, insert as first column
+    display = display.copy()
+    display["new"] = display["new"].map({True: "NEW", False: ""})
+    cols = ["new"] + [c for c in display.columns if c != "new"]
+    print(display[cols].to_string(index=False))
 
     if not args.standard:
         print("\nColumns: ud_mult = Underdog payout multiplier for this leg")
@@ -600,7 +640,7 @@ Examples:
         print("         edge = prob - required_prob (positive = +EV pick)")
 
     if args.save:
-        picks.to_csv(UNDERDOG_PICKS_CSV, index=False)
+        picks.drop(columns=["new"], errors="ignore").to_csv(UNDERDOG_PICKS_CSV, index=False)
         print(f"\nSaved {len(picks)} picks to {UNDERDOG_PICKS_CSV}")
 
 
