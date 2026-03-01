@@ -575,6 +575,8 @@ Examples:
                         help="Re-fetch data before scanning")
     parser.add_argument("--save", action="store_true",
                         help=f"Save all results to {UNDERDOG_PICKS_CSV}")
+    parser.add_argument("--archive", action="store_true",
+                        help="Upload source CSVs and picks to S3 (requires S3_BUCKET env var)")
     parser.add_argument("--debug", action="store_true",
                         help="Print diagnostic info about row counts and join keys")
     args = parser.parse_args()
@@ -642,6 +644,13 @@ Examples:
     if args.save:
         picks.drop(columns=["new"], errors="ignore").to_csv(UNDERDOG_PICKS_CSV, index=False)
         print(f"\nSaved {len(picks)} picks to {UNDERDOG_PICKS_CSV}")
+
+    if args.archive:
+        from src.storage import upload_run_snapshot
+        upload_run_snapshot(
+            source=args.source,
+            picks=picks.drop(columns=["new"], errors="ignore"),
+        )
 
 
 if __name__ == "__main__":
