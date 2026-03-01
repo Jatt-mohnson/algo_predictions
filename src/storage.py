@@ -43,6 +43,9 @@ def upload_run_snapshot(
         prefix:  Top-level key prefix (default: "ud-picks").
     """
     import boto3
+    from dotenv import load_dotenv
+
+    load_dotenv()
 
     from src.common import KALSHI_CSV, DRAFTKINGS_CSV, PINNACLE_CSV, UNDERDOG_CSV
 
