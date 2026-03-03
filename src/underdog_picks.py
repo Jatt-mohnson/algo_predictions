@@ -314,6 +314,7 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
 
     # Pass 1: exact threshold match
     joined = probs.merge(ud_pivot, on=["_join_player", "_join_stat", "threshold"], how="inner")
+    joined["_threshold_adj"] = False
 
     # Pass 2: Poisson-adjusted fuzzy fallback for UD rows that didn't match
     # (e.g. UD at 14.5 → threshold 15, source at 15.5 → threshold 16)
@@ -536,6 +537,127 @@ def load_previous_pick_keys(path: str = UNDERDOG_PICKS_CSV) -> set[tuple]:
         return set()
 
 
+def render_picks_image(df: pd.DataFrame) -> bytes:
+    """Render the picks DataFrame as a PNG image and return raw bytes.
+
+    Columns: new marker, player, matchup, stat, line, pick, mult, prob%, req%, edge.
+    NEW rows are highlighted green; numeric columns are right-aligned; prob/edge
+    values are formatted to one decimal place.
+    """
+    import io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    col_spec: list[tuple[str, str, str]] = [
+        # (src_col, header, align)
+        ("new",           "",       "l"),
+        ("player",        "player", "l"),
+        ("matchup",       "matchup","l"),
+        ("stat",          "stat",   "l"),
+        ("threshold",     "line",   "r"),
+        ("ud_pick",       "pick",   "l"),
+        ("ud_mult",       "mult",   "r"),
+        ("prob",          "prob%",  "r"),
+        ("required_prob", "req%",   "r"),
+        ("edge",          "edge",   "r"),
+    ]
+    spec = [(src, hdr, aln) for src, hdr, aln in col_spec if src in df.columns]
+    numeric_srcs = {"threshold", "ud_mult", "prob", "required_prob", "edge"}
+    right_cols = {i for i, (src, _, _) in enumerate(spec) if src in numeric_srcs}
+
+    def fmt(col: str, val) -> str:
+        if val is None or (isinstance(val, float) and pd.isna(val)) or val == "":
+            return ""
+        if col in ("prob", "required_prob", "edge"):
+            return f"{float(val):.1f}"
+        if col == "ud_mult":
+            return f"{float(val):.2f}"
+        return str(val)
+
+    headers = [hdr for _, hdr, _ in spec]
+    cell_data = [
+        [fmt(src, row.get(src, "")) for src, _, _ in spec]
+        for _, row in df.iterrows()
+    ]
+    n_rows, n_cols = len(cell_data), len(spec)
+
+    HEADER_BG   = "#1a1a2e"
+    HEADER_FG   = "#ffffff"
+    NEW_BG      = "#d4edda"
+    ROW_BG_EVEN = "#ffffff"
+    ROW_BG_ODD  = "#f2f2f2"
+    EDGE_FG     = "#dddddd"
+
+    row_colors = []
+    for i, (_, row) in enumerate(df.iterrows()):
+        if str(row.get("new", "")) == "NEW":
+            row_colors.append([NEW_BG] * n_cols)
+        elif i % 2 == 0:
+            row_colors.append([ROW_BG_EVEN] * n_cols)
+        else:
+            row_colors.append([ROW_BG_ODD] * n_cols)
+
+    fig_w = max(9, n_cols * 1.35)
+    fig_h = (n_rows + 1) * 0.38 + 0.4
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+    ax.axis("off")
+
+    tbl = ax.table(
+        cellText=cell_data,
+        colLabels=headers,
+        cellLoc="left",
+        loc="upper left",
+        bbox=[0, 0, 1, 1],
+        cellColours=row_colors,
+    )
+
+    # Header styling
+    for j in range(n_cols):
+        cell = tbl[0, j]
+        cell.set_facecolor(HEADER_BG)
+        cell.set_text_props(color=HEADER_FG, fontweight="bold", fontsize=9)
+        cell.set_edgecolor(HEADER_BG)
+
+    # Data cell styling
+    for (r, c), cell in tbl.get_celld().items():
+        if r == 0:
+            continue
+        cell.set_edgecolor(EDGE_FG)
+        cell.set_text_props(fontsize=9)
+        cell.get_text().set_ha("right" if c in right_cols else "left")
+
+    tbl.auto_set_font_size(False)
+    tbl.auto_set_column_width(range(n_cols))
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+def send_to_slack(image_bytes: bytes, token: str, channel: str) -> None:
+    """Upload a picks PNG to a Slack channel via the Web API."""
+    import io
+    from slack_sdk import WebClient
+    from slack_sdk.errors import SlackApiError
+
+    client = WebClient(token=token)
+    try:
+        client.files_upload_v2(
+            channel=channel,
+            file=io.BytesIO(image_bytes),
+            filename="picks.png",
+            title="Underdog Picks",
+        )
+    except SlackApiError as e:
+        print(f"Failed to send Slack notification: {e.response['error']}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Find +EV Underdog Fantasy legs using an external probability source.",
@@ -579,6 +701,8 @@ Examples:
                         help="Upload source CSVs and picks to S3 (requires S3_BUCKET env var)")
     parser.add_argument("--debug", action="store_true",
                         help="Print diagnostic info about row counts and join keys")
+    parser.add_argument("--slack", action="store_true",
+                        help="Post picks to Slack via SLACK_BOT_TOKEN + SLACK_CHANNEL_ID env vars")
     args = parser.parse_args()
 
     payout = args.payout if args.payout is not None else (3.5 if args.standard else 3.0)
@@ -634,7 +758,8 @@ Examples:
     display = display.copy()
     display["new"] = display["new"].map({True: "NEW", False: ""})
     cols = ["new"] + [c for c in display.columns if c != "new"]
-    print(display[cols].to_string(index=False))
+    table_str = display[cols].to_string(index=False)
+    print(table_str)
 
     if not args.standard:
         print("\nColumns: ud_mult = Underdog payout multiplier for this leg")
@@ -651,6 +776,17 @@ Examples:
             source=args.source,
             picks=picks.drop(columns=["new"], errors="ignore"),
         )
+
+    if args.slack:
+        from dotenv import load_dotenv
+        load_dotenv()
+        token = os.getenv("SLACK_BOT_TOKEN")
+        channel = os.getenv("SLACK_CHANNEL_ID")
+        if not token or not channel:
+            print("SLACK_BOT_TOKEN and SLACK_CHANNEL_ID must be set — skipping Slack notification.")
+        else:
+            send_to_slack(render_picks_image(display), token, channel)
+            print("Sent picks to Slack.")
 
 
 if __name__ == "__main__":
