@@ -35,6 +35,17 @@ Optional Slack integration:
 
 Optional S3 archiving:
 - `S3_BUCKET` — bucket name for `--archive` snapshots
+- Requires AWS credentials configured via `~/.aws/credentials` (or environment variables)
+
+## Scheduled Runs
+
+A cron job runs `ud-picks` every 15 minutes from 6:30 AM to 7:30 PM CST:
+
+```
+uv run ud-picks --standard --source draftkings --refresh --save --slack --archive
+```
+
+Logs go to `data/ud_picks_cron.log`.
 
 ## Usage Examples
 
@@ -198,3 +209,4 @@ All generated files live in `data/`:
 - `requests` — HTTP client for Underdog API (transitive dependency)
 - `matplotlib` — renders picks as a PNG image for Slack (`--slack`)
 - `slack-sdk` — posts image to Slack via `files_upload_v2` (`--slack`)
+- `boto3` — S3 uploads for `--archive` snapshots
