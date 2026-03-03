@@ -2,7 +2,7 @@ import requests
 import pandas as pd
 from urllib.parse import quote
 
-from src.common import KALSHI_STATS, DRAFTKINGS_CSV
+from src.common import DRAFTKINGS_CSV
 
 BASE_URL = "https://sportsbook-nash.draftkings.com/sites/US-SB/api/sportscontent/controldata/league/leagueSubcategory/v1/markets"
 LEAGUE_ID = "42648"  # NBA
@@ -16,7 +16,7 @@ HEADERS = {
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 }
 
-# Subcategory ID -> Kalshi stat name
+# Subcategory ID -> stat name (matches Underdog display_stat for join compatibility)
 SUBCATEGORY_MAP = {
     12488: "Points",
     12492: "Rebounds",
@@ -25,7 +25,11 @@ SUBCATEGORY_MAP = {
     12499: "Steals",
     12500: "Blocks",
     12502: "Turnovers",
-    12504: "Turnovers",
+    12504: "FT Made",       # standalone category — unconfirmed, verify against DK API
+    5001:  "Pts + Rebs + Asts",
+    9976:  "Points + Rebounds",
+    9973:  "Points + Assists",
+    9974:  "Rebounds + Assists",
 }
 
 
@@ -90,8 +94,6 @@ def main():
     all_rows = []
 
     for subcategory_id, stat_name in SUBCATEGORY_MAP.items():
-        if stat_name not in KALSHI_STATS:
-            continue
         try:
             data = fetch_subcategory(subcategory_id)
             rows = parse_props(data, stat_name)

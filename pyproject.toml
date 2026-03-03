@@ -5,9 +5,15 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "boto3>=1.34",
+    "duckdb>=1.0",
+    "pyarrow>=14.0",
     "pykalshi[dataframe]>=0.3.6",
     "python-dotenv>=1.2.1",
+    "matplotlib>=3.7",
+    "slack-sdk>=3.0",
     "rich>=13.0",
+    "scipy>=1.13",
 ]
 
 [build-system]
@@ -25,3 +31,8 @@ pinnacle = "src.pinnacle:main"
 trade = "src.trade:main"
 compare = "src.compare:main"
 dashboard = "src.dashboard:main"
+cbb-kalshi = "src.cbb_main:main"
+cbb-draftkings = "src.cbb_draftkings:main"
+cbb-pinnacle = "src.cbb_pinnacle:main"
+ud-picks = "src.underdog_picks:main"
+ud-query = "src.query:main"
