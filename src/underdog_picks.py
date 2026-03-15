@@ -391,7 +391,7 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
     has_matchup = "matchup" in joined.columns
 
     for _, row in joined.iterrows():
-        threshold_label = f"{int(row['threshold'])}+"
+        threshold_label = f"{int(row['threshold']) - 0.5:g}"
         ticker = row["ticker"] if has_ticker else ""
         matchup = row.get("matchup", "") if has_matchup else ""
         prob_adj = bool(row.get("_threshold_adj", False))
@@ -551,28 +551,28 @@ def render_picks_image(df: pd.DataFrame) -> bytes:
 
     col_spec: list[tuple[str, str, str]] = [
         # (src_col, header, align)
-        ("new",           "",       "l"),
-        ("player",        "player", "l"),
-        ("matchup",       "matchup","l"),
-        ("stat",          "stat",   "l"),
-        ("threshold",     "line",   "r"),
-        ("ud_pick",       "pick",   "l"),
-        ("ud_mult",       "mult",   "r"),
-        ("prob",          "prob%",  "r"),
-        ("required_prob", "req%",   "r"),
-        ("edge",          "edge",   "r"),
+        ("player",    "player",  "l"),
+        ("stat",      "stat",    "l"),
+        ("ud_pick",   "pick",    "l"),
+        ("threshold", "line",    "r"),
+        ("matchup",   "matchup", "l"),
+        ("ud_mult",   "mult",    "r"),
+        ("edge",      "edge",    "r"),
+        ("prob_adj",  "adj",     "l"),
     ]
     spec = [(src, hdr, aln) for src, hdr, aln in col_spec if src in df.columns]
-    numeric_srcs = {"threshold", "ud_mult", "prob", "required_prob", "edge"}
+    numeric_srcs = {"threshold", "ud_mult", "edge"}
     right_cols = {i for i, (src, _, _) in enumerate(spec) if src in numeric_srcs}
 
     def fmt(col: str, val) -> str:
         if val is None or (isinstance(val, float) and pd.isna(val)) or val == "":
             return ""
-        if col in ("prob", "required_prob", "edge"):
+        if col == "edge":
             return f"{float(val):.1f}"
         if col == "ud_mult":
             return f"{float(val):.2f}"
+        if col == "prob_adj":
+            return "" if val is True or str(val).lower() == "true" else "-"
         return str(val)
 
     headers = [hdr for _, hdr, _ in spec]
@@ -584,22 +584,26 @@ def render_picks_image(df: pd.DataFrame) -> bytes:
 
     HEADER_BG   = "#1a1a2e"
     HEADER_FG   = "#ffffff"
-    NEW_BG      = "#d4edda"
+    OVER_BG     = "#d4edda"
+    UNDER_BG    = "#f8d7da"
     ROW_BG_EVEN = "#ffffff"
     ROW_BG_ODD  = "#f2f2f2"
     EDGE_FG     = "#dddddd"
 
     row_colors = []
     for i, (_, row) in enumerate(df.iterrows()):
-        if str(row.get("new", "")) == "NEW":
-            row_colors.append([NEW_BG] * n_cols)
+        pick = str(row.get("ud_pick", "")).lower()
+        if pick == "over":
+            row_colors.append([OVER_BG] * n_cols)
+        elif pick == "under":
+            row_colors.append([UNDER_BG] * n_cols)
         elif i % 2 == 0:
             row_colors.append([ROW_BG_EVEN] * n_cols)
         else:
             row_colors.append([ROW_BG_ODD] * n_cols)
 
-    fig_w = max(9, n_cols * 1.35)
-    fig_h = (n_rows + 1) * 0.38 + 0.4
+    fig_w = max(18, n_cols * 2.5)
+    fig_h = (n_rows + 1) * 0.65 + 0.6
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     fig.patch.set_facecolor("#ffffff")
     ax.set_facecolor("#ffffff")
@@ -618,22 +622,25 @@ def render_picks_image(df: pd.DataFrame) -> bytes:
     for j in range(n_cols):
         cell = tbl[0, j]
         cell.set_facecolor(HEADER_BG)
-        cell.set_text_props(color=HEADER_FG, fontweight="bold", fontsize=9)
+        cell.set_text_props(color=HEADER_FG, fontweight="bold", fontsize=20)
         cell.set_edgecolor(HEADER_BG)
+
+    new_rows = {i + 1 for i, (_, row) in enumerate(df.iterrows()) if str(row.get("new", "")) == "NEW"}
 
     # Data cell styling
     for (r, c), cell in tbl.get_celld().items():
         if r == 0:
             continue
         cell.set_edgecolor(EDGE_FG)
-        cell.set_text_props(fontsize=9)
+        weight = "bold" if r in new_rows else "normal"
+        cell.set_text_props(fontsize=19, fontweight=weight)
         cell.get_text().set_ha("right" if c in right_cols else "left")
 
     tbl.auto_set_font_size(False)
     tbl.auto_set_column_width(range(n_cols))
 
     buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+    plt.savefig(buf, format="png", dpi=200, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     buf.seek(0)
