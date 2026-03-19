@@ -354,7 +354,8 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
             # Thresholds here are already integers (ceil of stat_value + 0.5),
             # so pass them directly — math.ceil(int) == int.
             adj_over = adjust_prob_for_threshold(
-                float(best["over_prob"]) / 100.0, src_thresh, ud_thresh
+                float(best["over_prob"]) / 100.0, src_thresh, ud_thresh,
+                stat=ud_row.get("_join_stat"),
             )
             if adj_over is None:
                 continue
@@ -403,6 +404,11 @@ def find_picks(legs: int, payout: float, source: str = "kalshi",
             prob = row.get(prob_col)
             mult = row.get(mult_col)
             if pd.isna(prob):
+                continue
+
+            # Skip: P+R under on threshold-adjusted lines is systematically miscalibrated
+            # (46.8% hit rate, CI [43.9%, 49.7%], p=0.030 — backtest 2026-02-28–2026-03-15)
+            if prob_adj and side == "under" and str(row.get("stat", "")).lower().strip() == "points + rebounds":
                 continue
 
             if standard:
